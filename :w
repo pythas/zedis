@@ -1,20 +1,8 @@
 const std = @import("std");
 
-pub const Null = struct {
-    const Self = @This();
+const Null = struct {};
 
-    pub fn init() Self {
-        return .{};
-    }
-
-    pub fn toString(_: Self) []const u8 {
-        return "$-1\r\n";
-    }
-
-    pub fn deinit(_: Self, _: std.mem.Allocator) void {}
-};
-
-pub const SimpleError = struct {
+const SimpleError = struct {
     const Self = @This();
 
     data: []const u8,
@@ -22,16 +10,9 @@ pub const SimpleError = struct {
     pub fn init(data: []const u8) Self {
         return .{ .data = data };
     }
-
-    pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "-{s}\r\n", .{self.data});
-    }
-    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.data);
-    }
 };
 
-pub const SimpleString = struct {
+const SimpleString = struct {
     const Self = @This();
 
     data: []const u8,
@@ -39,17 +20,9 @@ pub const SimpleString = struct {
     pub fn init(data: []const u8) Self {
         return .{ .data = data };
     }
-
-    pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "+{s}\r\n", .{self.data});
-    }
-
-    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.data);
-    }
 };
 
-pub const BulkString = struct {
+const BulkString = struct {
     const Self = @This();
 
     length: usize,
@@ -58,20 +31,9 @@ pub const BulkString = struct {
     pub fn init(length: usize, data: []const u8) Self {
         return .{ .length = length, .data = data };
     }
-
-    pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "${d}\r\n{s}\r\n", .{
-            self.length,
-            self.data,
-        });
-    }
-
-    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.data);
-    }
 };
 
-pub const Array = struct {
+const Array = struct {
     const Self = @This();
 
     size: usize,
@@ -80,24 +42,6 @@ pub const Array = struct {
     pub fn init(size: usize, data: []Data) Self {
         return .{ .size = size, .data = data };
     }
-
-    pub fn toString(self: Self, parser: Parser, allocator: std.mem.Allocator) ![]const u8 {
-        var result = try std.fmt.allocPrint(allocator, "*{d}\r\n", .{self.size});
-
-        for (self.data) |item| {
-            const string = try parser.serialize(item);
-            result = try std.fmt.allocPrint(allocator, "{s}{s}", .{ result, string });
-        }
-
-        return result;
-    }
-
-    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-        for (self.data) |item| {
-            item.deinit(allocator);
-        }
-        allocator.free(self.data);
-    }
 };
 
 const DeserializeError = error{
@@ -105,28 +49,12 @@ const DeserializeError = error{
     InvalidType,
 };
 
-const SerializeError = error{
-    OutOfMemory,
-};
-
-pub const Data = union(enum) {
-    const Self = @This();
-
+const Data = union(enum) {
     null: Null,
     simple_error: SimpleError,
     simple_string: SimpleString,
     bulk_string: BulkString,
     array: Array,
-
-    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .null => |*x| x.deinit(allocator),
-            .simple_error => |*x| x.deinit(allocator),
-            .simple_string => |*x| x.deinit(allocator),
-            .bulk_string => |*x| x.deinit(allocator),
-            .array => |*x| x.deinit(allocator),
-        }
-    }
 };
 
 const Result = struct {
@@ -149,16 +77,6 @@ pub const Parser = struct {
         _ = self;
     }
 
-    pub fn serialize(self: Self, data: Data) SerializeError![]const u8 {
-        return switch (data) {
-            .null => data.null.toString(),
-            .simple_error => data.simple_error.toString(self.allocator),
-            .simple_string => data.simple_string.toString(self.allocator),
-            .bulk_string => data.bulk_string.toString(self.allocator),
-            .array => data.array.toString(self, self.allocator),
-        };
-    }
-
     pub fn deserialize(self: Self, str: []const u8) DeserializeError!Result {
         return switch (str[0]) {
             '-' => self.simple_error(str),
@@ -174,30 +92,20 @@ pub const Parser = struct {
         usize,
     } {
         var i: usize = 1;
+        var capacity: usize = 10;
+        var str = try self.allocator.alloc(u8, capacity);
 
         while (resp[i] != '\r') {
+            if (i == capacity) {
+                capacity *= 2;
+                str = try self.allocator.realloc(str, capacity);
+            }
+
+            str[i - 1] = resp[i];
             i += 1;
         }
 
-        const string = resp[1..i];
-        const string_copy = try self.allocator.dupe(u8, string);
-        return .{ string_copy, i + 2 };
-        // var i: usize = 1;
-        // var capacity: usize = 10;
-        // var str = try self.allocator.alloc(u8, capacity);
-        // defer self.allocator.free(str);
-        //
-        // while (resp[i] != '\r') {
-        //     if (i == capacity) {
-        //         capacity *= 2;
-        //         str = try self.allocator.realloc(str, capacity);
-        //     }
-        //
-        //     str[i - 1] = resp[i];
-        //     i += 1;
-        // }
-        //
-        // return .{ str[0 .. i - 1], i + 2 };
+        return .{ str[0 .. i - 1], i + 2 };
     }
 
     fn parse_bulk_string(self: Self, resp: []const u8) !struct {
@@ -226,21 +134,16 @@ pub const Parser = struct {
             return .{ null, null, i };
         }
 
-        const string = resp[i .. i + length];
-        const string_copy = try self.allocator.dupe(u8, string);
+        var string = try self.allocator.alloc(u8, length);
+        var j: usize = 0;
 
-        return .{ length, string_copy, i + length + 2 };
-        // var string = try self.allocator.alloc(u8, length);
-        // defer self.allocator.free(string);
-        // var j: usize = 0;
-        //
-        // while (resp[i] != '\r') {
-        //     string[j] = resp[i];
-        //     i += 1;
-        //     j += 1;
-        // }
-        //
-        // return .{ length, string, i + 2 };
+        while (resp[i] != '\r') {
+            string[j] = resp[i];
+            i += 1;
+            j += 1;
+        }
+
+        return .{ length, string, i + 2 };
     }
 
     fn simple_error(self: Self, resp: []const u8) !Result {
@@ -302,52 +205,6 @@ pub const Parser = struct {
         };
     }
 };
-
-test "serialize" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const parser = Parser.init(allocator);
-    defer parser.deinit();
-
-    {
-        const data = Data{ .null = Null.init() };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("$-1\r\n", result);
-    }
-
-    {
-        const data = Data{ .simple_error = SimpleError.init("Error") };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("-Error\r\n", result);
-    }
-
-    {
-        const data = Data{ .simple_string = SimpleString.init("Message") };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("+Message\r\n", result);
-    }
-
-    {
-        const data = Data{ .bulk_string = BulkString.init(4, "Bulk") };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("$4\r\nBulk\r\n", result);
-    }
-
-    {
-        var array_data: [1]Data = undefined;
-        array_data[0] = Data{ .simple_string = SimpleString.init("item") };
-        const data = Data{ .array = Array.init(1, &array_data) };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("*1\r\n+item\r\n", result);
-    }
-}
 
 test "deserialize" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
