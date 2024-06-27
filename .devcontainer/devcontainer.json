@@ -1,0 +1,16 @@
+{
+    "name": "Zig",
+    "dockerFile": "Dockerfile",
+    "features": {
+        "ghcr.io/devcontainers-contrib/features/zig:1": {
+            "version": "master"
+        }
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ziglang.vscode-zig"
+            ]
+        }
+    }
+}
