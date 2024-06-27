@@ -183,22 +183,6 @@ pub const Parser = struct {
         const string = resp[1..i];
         const string_copy = try self.allocator.dupe(u8, string);
         return .{ string_copy, i + 2 };
-        // var i: usize = 1;
-        // var capacity: usize = 10;
-        // var str = try self.allocator.alloc(u8, capacity);
-        // defer self.allocator.free(str);
-        //
-        // while (resp[i] != '\r') {
-        //     if (i == capacity) {
-        //         capacity *= 2;
-        //         str = try self.allocator.realloc(str, capacity);
-        //     }
-        //
-        //     str[i - 1] = resp[i];
-        //     i += 1;
-        // }
-        //
-        // return .{ str[0 .. i - 1], i + 2 };
     }
 
     fn parse_bulk_string(self: Self, resp: []const u8) !struct {
@@ -231,17 +215,6 @@ pub const Parser = struct {
         const string_copy = try self.allocator.dupe(u8, string);
 
         return .{ length, string_copy, i + length + 2 };
-        // var string = try self.allocator.alloc(u8, length);
-        // defer self.allocator.free(string);
-        // var j: usize = 0;
-        //
-        // while (resp[i] != '\r') {
-        //     string[j] = resp[i];
-        //     i += 1;
-        //     j += 1;
-        // }
-        //
-        // return .{ length, string, i + 2 };
     }
 
     fn simple_error(self: Self, resp: []const u8) !Result {
