@@ -12,24 +12,38 @@ const Command = enum {
     get,
 };
 
+const Entry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 const Zedis = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex,
-    store: std.hash_map.StringHashMap([]const u8),
+    store: std.hash_map.StringHashMap(Entry),
     parser: Parser,
 
     pub fn init(allocator: std.mem.Allocator) !Self {
         return .{
             .allocator = allocator,
             .mutex = std.Thread.Mutex{},
-            .store = std.hash_map.StringHashMap([]const u8).init(allocator),
+            .store = std.hash_map.StringHashMap(Entry).init(allocator),
             .parser = Parser.init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
+        var it = self.store.iterator();
+
+        // TODO: free
+        while (it.next()) |entry| {
+            _ = entry;
+            // self.allocator.free(entry.key_ptr.*);
+            // self.allocator.free(entry.value_ptr.*);
+        }
+
         self.store.deinit();
         self.parser.deinit();
     }
@@ -49,9 +63,9 @@ const Zedis = struct {
                 break;
             }
 
-            std.debug.print("Received data: {s}\n", .{buffer});
+            const resp = buffer[0..read_size];
 
-            const result = self.parser.deserialize(buffer) catch {
+            const result = self.parser.deserialize(resp) catch {
                 std.debug.print("Deserialization error\n", .{});
                 break;
             };
@@ -72,46 +86,68 @@ const Zedis = struct {
 
     fn handlePing(self: *Self, connection: net.Server.Connection) !void {
         const data = Data{ .simple_string = SimpleString.init("PONG") };
-        _ = try connection.stream.write(try self.parser.serialize(data));
+        const string = try self.parser.serialize(data);
+        defer self.allocator.free(string);
+        _ = try connection.stream.write(string);
     }
 
     fn handleEcho(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
         const data = Data{ .simple_string = SimpleString.init(message) };
-        _ = try connection.stream.write(try self.parser.serialize(data));
+        const string = try self.parser.serialize(data);
+        defer self.allocator.free(string);
+        _ = try connection.stream.write(string);
     }
 
     fn handleSet(self: *Self, connection: net.Server.Connection, key: []const u8, value: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.store.put(key, value);
+        const key_copy = try self.allocator.dupe(u8, key);
+        const value_copy = try self.allocator.dupe(u8, value);
+
+        const entry = Entry{
+            .key = key_copy,
+            .value = value_copy,
+        };
+
+        if (self.store.get(key)) |old_entry| {
+            _ = self.store.remove(key);
+            self.allocator.free(old_entry.key);
+            self.allocator.free(old_entry.value);
+        }
+
+        try self.store.put(key_copy, entry);
+
         const data = Data{ .simple_string = SimpleString.init("OK") };
-        _ = try connection.stream.write(try self.parser.serialize(data));
+        const string = try self.parser.serialize(data);
+        defer self.allocator.free(string);
+        _ = try connection.stream.write(string);
     }
 
     fn handleGet(self: *Self, connection: net.Server.Connection, key: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const maybe_value = self.store.get(key);
+        const maybe_entry = self.store.get(key);
         var data: Data = undefined;
 
-        if (maybe_value) |value| {
-            data = Data{ .simple_string = SimpleString.init(value) };
+        if (maybe_entry) |entry| {
+            data = Data{ .simple_string = SimpleString.init(entry.value) };
         } else {
             data = Data{ .null = Null.init() };
         }
 
-        _ = try connection.stream.write(try self.parser.serialize(data));
+        const string = try self.parser.serialize(data);
+        defer self.allocator.free(string);
+        _ = try connection.stream.write(string);
     }
 };
 
 pub fn main() !void {
     std.debug.print("\n", .{});
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
 
     var zedis = try Zedis.init(allocator);
     defer zedis.deinit();

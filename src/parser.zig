@@ -26,6 +26,7 @@ pub const SimpleError = struct {
     pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
         return std.fmt.allocPrint(allocator, "-{s}\r\n", .{self.data});
     }
+
     pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
     }
