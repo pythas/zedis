@@ -1,6 +1,7 @@
 const std = @import("std");
 const net = std.net;
 const Parser = @import("parser.zig").Parser;
+const Result = @import("parser.zig").Result;
 const Data = @import("parser.zig").Data;
 const SimpleString = @import("parser.zig").SimpleString;
 const Null = @import("parser.zig").Null;
@@ -47,6 +48,24 @@ pub const Server = struct {
         self.parser.deinit();
     }
 
+    fn getArg(result: *const Result, index: usize) ![]const u8 {
+        if (index >= result.data.array.data.len) {
+            return error.IndexOutOfBounds;
+        }
+
+        const element = result.data.array.data[index];
+
+        switch (element) {
+            .bulk_string => |bulk_string| {
+                if (bulk_string.data.len == 0) {
+                    return error.InvalidArgument;
+                }
+                return bulk_string.data;
+            },
+            else => return error.InvalidArgument,
+        }
+    }
+
     pub fn handleConnection(self: *Self, connection: net.Server.Connection) !void {
         defer connection.stream.close();
 
@@ -72,29 +91,44 @@ pub const Server = struct {
             defer result.data.deinit(self.allocator);
 
             var cmd_buffer: [16]u8 = undefined;
-            const cmd_str = std.ascii.lowerString(&cmd_buffer, result.data.array.data[0].bulk_string.data);
+            const cmd_str = std.ascii.lowerString(&cmd_buffer, try Self.getArg(&result, 0));
             const cmd = std.meta.stringToEnum(Command, cmd_str) orelse break;
 
+            // TODO: catch and return errors to client
             switch (cmd) {
                 .ping => try self.handlePing(connection),
-                .echo => try self.handleEcho(connection, result.data.array.data[1].bulk_string.data),
-                .set => try self.handleSet(connection, result.data.array.data[1].bulk_string.data, result.data.array.data[2].bulk_string.data),
-                .get => try self.handleGet(connection, result.data.array.data[1].bulk_string.data),
+                .echo => {
+                    const arg = try Self.getArg(&result, 1);
+                    try self.handleEcho(connection, arg);
+                },
+                .set => {
+                    const arg1 = try Self.getArg(&result, 1);
+                    const arg2 = try Self.getArg(&result, 2);
+                    try self.handleSet(connection, arg1, arg2);
+                },
+                .get => {
+                    const arg = try Self.getArg(&result, 1);
+                    try self.handleGet(connection, arg);
+                },
             }
         }
     }
 
     fn handlePing(self: *Self, connection: net.Server.Connection) !void {
-        const data = Data{ .simple_string = SimpleString.init("PONG") };
-        const string = try self.parser.serialize(data);
+        const string = try self.parser.serialize(Data{
+            .simple_string = SimpleString.init("PONG"),
+        });
         defer self.allocator.free(string);
+
         _ = try connection.stream.write(string);
     }
 
     fn handleEcho(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
-        const data = Data{ .simple_string = SimpleString.init(message) };
-        const string = try self.parser.serialize(data);
+        const string = try self.parser.serialize(Data{
+            .simple_string = SimpleString.init(message),
+        });
         defer self.allocator.free(string);
+
         _ = try connection.stream.write(string);
     }
 
@@ -118,9 +152,11 @@ pub const Server = struct {
 
         try self.store.put(key_copy, entry);
 
-        const data = Data{ .simple_string = SimpleString.init("OK") };
-        const string = try self.parser.serialize(data);
+        const string = try self.parser.serialize(Data{
+            .simple_string = SimpleString.init("OK"),
+        });
         defer self.allocator.free(string);
+
         _ = try connection.stream.write(string);
     }
 
@@ -139,6 +175,7 @@ pub const Server = struct {
 
         const string = try self.parser.serialize(data);
         defer self.allocator.free(string);
+
         _ = try connection.stream.write(string);
     }
 };

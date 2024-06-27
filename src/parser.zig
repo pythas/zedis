@@ -130,7 +130,7 @@ pub const Data = union(enum) {
     }
 };
 
-const Result = struct {
+pub const Result = struct {
     data: Data,
     bytes_read: usize,
 };
