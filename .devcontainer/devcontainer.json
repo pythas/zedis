@@ -9,7 +9,8 @@
     "customizations": {
         "vscode": {
             "extensions": [
-                "ziglang.vscode-zig"
+                "ziglang.vscode-zig",
+                "copilot.copilot"
             ]
         }
     }
