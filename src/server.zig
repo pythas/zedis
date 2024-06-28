@@ -1,10 +1,14 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const net = std.net;
 const Parser = @import("parser.zig").Parser;
 const Result = @import("parser.zig").Result;
 const Data = @import("parser.zig").Data;
 const SimpleString = @import("parser.zig").SimpleString;
+const SimpleError = @import("parser.zig").SimpleError;
 const Null = @import("parser.zig").Null;
+const SerializeError = @import("parser.zig").SerializeError;
+const DeserializeError = @import("parser.zig").DeserializeError;
 
 const Command = enum {
     ping,
@@ -17,6 +21,20 @@ const Entry = struct {
     key: []const u8,
     value: []const u8,
 };
+
+const ServerError = error{
+    SerializeError,
+    DeserializeError,
+    InvalidNumberOfArguments,
+    InvalidArgument,
+    IndexOutOfBounds,
+    OutOfMemory,
+    InvalidCommand,
+};
+
+const StreamError = std.posix.WriteError;
+
+const Error = ServerError || StreamError;
 
 pub const Server = struct {
     const Self = @This();
@@ -36,7 +54,6 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Self) void {
-
         // TODO: fixme
         // var it = self.store.iterator();
         // while (it.next()) |entry| {
@@ -48,20 +65,23 @@ pub const Server = struct {
         self.parser.deinit();
     }
 
-    fn getArg(result: *const Result, index: usize) ![]const u8 {
-        if (index >= result.data.array.data.len) {
-            return error.IndexOutOfBounds;
+    fn getNumArgs(result: Result) usize {
+        return result.data.array.data.len;
+    }
+
+    fn assertNumArgs(result: Result, num: u8) Error!void {
+        if (Self.getNumArgs(result) != num) {
+            return error.InvalidNumberOfArguments;
         }
+    }
+
+    fn getArg(result: Result, index: usize) ![]const u8 {
+        assert(index < result.data.array.data.len);
 
         const element = result.data.array.data[index];
 
         switch (element) {
-            .bulk_string => |bulk_string| {
-                if (bulk_string.data.len == 0) {
-                    return error.InvalidArgument;
-                }
-                return bulk_string.data;
-            },
+            .bulk_string => |bulk_string| return bulk_string.data,
             else => return error.InvalidArgument,
         }
     }
@@ -90,46 +110,65 @@ pub const Server = struct {
             };
             defer result.data.deinit(self.allocator);
 
-            var cmd_buffer: [16]u8 = undefined;
-            const cmd_str = std.ascii.lowerString(&cmd_buffer, try Self.getArg(&result, 0));
-            const cmd = std.meta.stringToEnum(Command, cmd_str) orelse break;
+            const arg = try Self.getArg(result, 0);
 
-            // TODO: catch and return errors to client
-            switch (cmd) {
-                .ping => try self.handlePing(connection),
-                .echo => {
-                    const arg = try Self.getArg(&result, 1);
-                    try self.handleEcho(connection, arg);
-                },
-                .set => {
-                    const arg1 = try Self.getArg(&result, 1);
-                    const arg2 = try Self.getArg(&result, 2);
-                    try self.handleSet(connection, arg1, arg2);
-                },
-                .get => {
-                    const arg = try Self.getArg(&result, 1);
-                    try self.handleGet(connection, arg);
-                },
+            if (arg.len > 16) {
+                try self.writeError(connection, "ERR command too long");
+                continue;
             }
+
+            var cmd_buffer: [16]u8 = undefined;
+            const cmd_str = std.ascii.lowerString(&cmd_buffer, arg);
+            const cmd = std.meta.stringToEnum(Command, cmd_str) orelse {
+                try self.writeError(connection, "ERR unknown command");
+                continue;
+            };
+
+            self.handleCmd(connection, cmd, result) catch |err| {
+                switch (err) {
+                    error.InvalidNumberOfArguments => try self.writeError(connection, "ERR wrong number of arguments for command"),
+                    error.SerializeError => try self.writeError(connection, "ERR serialization error"),
+                    error.DeserializeError => try self.writeError(connection, "ERR deserialization error"),
+                    else => try self.writeError(connection, "ERR unknown error"),
+                }
+            };
         }
     }
 
-    fn handlePing(self: *Self, connection: net.Server.Connection) !void {
-        const string = try self.parser.serialize(Data{
-            .simple_string = SimpleString.init("PONG"),
-        });
-        defer self.allocator.free(string);
+    fn handleCmd(self: *Self, connection: net.Server.Connection, cmd: Command, result: Result) Error!void {
+        switch (cmd) {
+            .ping => try self.handlePing(connection),
+            .echo => {
+                try Self.assertNumArgs(result, 2);
 
-        _ = try connection.stream.write(string);
+                const arg = try Self.getArg(result, 1);
+
+                try self.handleEcho(connection, arg);
+            },
+            .set => {
+                try Self.assertNumArgs(result, 3);
+
+                const arg1 = try Self.getArg(result, 1);
+                const arg2 = try Self.getArg(result, 2);
+
+                try self.handleSet(connection, arg1, arg2);
+            },
+            .get => {
+                try Self.assertNumArgs(result, 2);
+
+                const arg = try Self.getArg(result, 1);
+
+                try self.handleGet(connection, arg);
+            },
+        }
+    }
+
+    fn handlePing(self: *Self, connection: net.Server.Connection) Error!void {
+        try self.writeString(connection, "PONG");
     }
 
     fn handleEcho(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
-        const string = try self.parser.serialize(Data{
-            .simple_string = SimpleString.init(message),
-        });
-        defer self.allocator.free(string);
-
-        _ = try connection.stream.write(string);
+        try self.writeString(connection, message);
     }
 
     fn handleSet(self: *Self, connection: net.Server.Connection, key: []const u8, value: []const u8) !void {
@@ -152,12 +191,7 @@ pub const Server = struct {
 
         try self.store.put(key_copy, entry);
 
-        const string = try self.parser.serialize(Data{
-            .simple_string = SimpleString.init("OK"),
-        });
-        defer self.allocator.free(string);
-
-        _ = try connection.stream.write(string);
+        try self.writeString(connection, "OK");
     }
 
     fn handleGet(self: *Self, connection: net.Server.Connection, key: []const u8) !void {
@@ -165,17 +199,39 @@ pub const Server = struct {
         defer self.mutex.unlock();
 
         const maybe_entry = self.store.get(key);
-        var data: Data = undefined;
 
         if (maybe_entry) |entry| {
-            data = Data{ .simple_string = SimpleString.init(entry.value) };
+            try self.writeString(connection, entry.value);
         } else {
-            data = Data{ .null = Null.init() };
+            try self.writeNull(connection);
         }
+    }
 
-        const string = try self.parser.serialize(data);
+    fn write(connection: net.Server.Connection, data: []const u8) void {
+        _ = connection.stream.write(data) catch |err| {
+            std.debug.print("Error writing to stream: {}\n", .{err});
+        };
+    }
+
+    fn writeError(self: Self, connection: net.Server.Connection, message: []const u8) !void {
+        const string = try self.parser.serialize(Data{
+            .simple_error = SimpleError.init(message),
+        });
         defer self.allocator.free(string);
 
-        _ = try connection.stream.write(string);
+        Self.write(connection, string);
+    }
+
+    fn writeString(self: Self, connection: net.Server.Connection, message: []const u8) !void {
+        const string = try self.parser.serialize(Data{
+            .simple_string = SimpleString.init(message),
+        });
+        defer self.allocator.free(string);
+
+        Self.write(connection, string);
+    }
+
+    fn writeNull(self: Self, connection: net.Server.Connection) !void {
+        Self.write(connection, try self.parser.serialize(Data{ .null = Null.init() }));
     }
 };

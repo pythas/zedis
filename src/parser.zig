@@ -101,12 +101,12 @@ pub const Array = struct {
     }
 };
 
-const DeserializeError = error{
+pub const DeserializeError = error{
     OutOfMemory,
     InvalidType,
 };
 
-const SerializeError = error{
+pub const SerializeError = error{
     OutOfMemory,
 };
 
@@ -146,9 +146,7 @@ pub const Parser = struct {
         };
     }
 
-    pub fn deinit(self: Self) void {
-        _ = self;
-    }
+    pub fn deinit(_: Self) void {}
 
     pub fn serialize(self: Self, data: Data) SerializeError![]const u8 {
         return switch (data) {
@@ -160,6 +158,52 @@ pub const Parser = struct {
         };
     }
 
+    test "serialize" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const parser = Parser.init(allocator);
+        defer parser.deinit();
+
+        {
+            const data = Data{ .null = Null.init() };
+
+            const result = try parser.serialize(data);
+            try std.testing.expectEqualStrings("$-1\r\n", result);
+        }
+
+        {
+            const data = Data{ .simple_error = SimpleError.init("Error") };
+
+            const result = try parser.serialize(data);
+            try std.testing.expectEqualStrings("-Error\r\n", result);
+        }
+
+        {
+            const data = Data{ .simple_string = SimpleString.init("Message") };
+
+            const result = try parser.serialize(data);
+            try std.testing.expectEqualStrings("+Message\r\n", result);
+        }
+
+        {
+            const data = Data{ .bulk_string = BulkString.init(4, "Bulk") };
+
+            const result = try parser.serialize(data);
+            try std.testing.expectEqualStrings("$4\r\nBulk\r\n", result);
+        }
+
+        {
+            var array_data: [1]Data = undefined;
+            array_data[0] = Data{ .simple_string = SimpleString.init("item") };
+            const data = Data{ .array = Array.init(1, &array_data) };
+
+            const result = try parser.serialize(data);
+            try std.testing.expectEqualStrings("*1\r\n+item\r\n", result);
+        }
+    }
+
     pub fn deserialize(self: Self, str: []const u8) DeserializeError!Result {
         return switch (str[0]) {
             '-' => self.simple_error(str),
@@ -168,6 +212,62 @@ pub const Parser = struct {
             '*' => self.array(str),
             else => return DeserializeError.InvalidType,
         };
+    }
+
+    test "deserialize" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const parser = Parser.init(allocator);
+        defer parser.deinit();
+
+        {
+            const result = try parser.deserialize("+lorem ipsum dolor sit amet\r\n");
+            try std.testing.expect(switch (result.data) {
+                .simple_string => true,
+                else => false,
+            });
+            try std.testing.expectEqualStrings("lorem ipsum dolor sit amet", result.data.simple_string.data);
+        }
+
+        {
+            const result = try parser.deserialize("$3\r\nget\r\n");
+            try std.testing.expect(switch (result.data) {
+                .bulk_string => true,
+                else => false,
+            });
+            try std.testing.expectEqual(3, result.data.bulk_string.length);
+            try std.testing.expectEqualStrings("get", result.data.bulk_string.data);
+        }
+
+        {
+            const result = try parser.deserialize("$-1\r\n");
+            try std.testing.expect(switch (result.data) {
+                .null => true,
+                else => false,
+            });
+        }
+
+        {
+            const result = try parser.deserialize("-Error\r\n");
+            try std.testing.expect(switch (result.data) {
+                .simple_error => true,
+                else => false,
+            });
+            try std.testing.expectEqualStrings("Error", result.data.simple_error.data);
+        }
+
+        {
+            const result = try parser.deserialize("*1\r\n$3\r\nget\r\n");
+            try std.testing.expect(switch (result.data) {
+                .array => true,
+                else => false,
+            });
+            try std.testing.expectEqual(1, result.data.array.size);
+            try std.testing.expectEqual(3, result.data.array.data[0].bulk_string.length);
+            try std.testing.expectEqualStrings("get", result.data.array.data[0].bulk_string.data);
+        }
     }
 
     fn parse_simple_string(self: Self, resp: []const u8) !struct {
@@ -276,105 +376,3 @@ pub const Parser = struct {
         };
     }
 };
-
-test "serialize" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const parser = Parser.init(allocator);
-    defer parser.deinit();
-
-    {
-        const data = Data{ .null = Null.init() };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("$-1\r\n", result);
-    }
-
-    {
-        const data = Data{ .simple_error = SimpleError.init("Error") };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("-Error\r\n", result);
-    }
-
-    {
-        const data = Data{ .simple_string = SimpleString.init("Message") };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("+Message\r\n", result);
-    }
-
-    {
-        const data = Data{ .bulk_string = BulkString.init(4, "Bulk") };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("$4\r\nBulk\r\n", result);
-    }
-
-    {
-        var array_data: [1]Data = undefined;
-        array_data[0] = Data{ .simple_string = SimpleString.init("item") };
-        const data = Data{ .array = Array.init(1, &array_data) };
-
-        const result = try parser.serialize(data);
-        try std.testing.expectEqualStrings("*1\r\n+item\r\n", result);
-    }
-}
-
-test "deserialize" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const parser = Parser.init(allocator);
-    defer parser.deinit();
-
-    {
-        const result = try parser.deserialize("+lorem ipsum dolor sit amet\r\n");
-        try std.testing.expect(switch (result.data) {
-            .simple_string => true,
-            else => false,
-        });
-        try std.testing.expectEqualStrings("lorem ipsum dolor sit amet", result.data.simple_string.data);
-    }
-
-    {
-        const result = try parser.deserialize("$3\r\nget\r\n");
-        try std.testing.expect(switch (result.data) {
-            .bulk_string => true,
-            else => false,
-        });
-        try std.testing.expectEqual(3, result.data.bulk_string.length);
-        try std.testing.expectEqualStrings("get", result.data.bulk_string.data);
-    }
-
-    {
-        const result = try parser.deserialize("$-1\r\n");
-        try std.testing.expect(switch (result.data) {
-            .null => true,
-            else => false,
-        });
-    }
-
-    {
-        const result = try parser.deserialize("-Error\r\n");
-        try std.testing.expect(switch (result.data) {
-            .simple_error => true,
-            else => false,
-        });
-        try std.testing.expectEqualStrings("Error", result.data.simple_error.data);
-    }
-
-    {
-        const result = try parser.deserialize("*1\r\n$3\r\nget\r\n");
-        try std.testing.expect(switch (result.data) {
-            .array => true,
-            else => false,
-        });
-        try std.testing.expectEqual(1, result.data.array.size);
-        try std.testing.expectEqual(3, result.data.array.data[0].bulk_string.length);
-        try std.testing.expectEqualStrings("get", result.data.array.data[0].bulk_string.data);
-    }
-}
